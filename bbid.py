@@ -15,16 +15,17 @@ import urllib.request
 
 # config
 output_dir = './bing'  # default output dir
-adult_filter = True  # Do not disable adult filter by default
+ADULT_FILTER_ON = True  # Do not disable adult filter by default
 socket.setdefaulttimeout(2)
 
 tried_urls = []
 image_md5s = {}
 in_progress = 0
+adlt = ""
 urlopenheader = {'User-Agent': 'Mozilla/5.0 (X11; Fedora; Linux x86_64; rv:60.0) Gecko/20100101 Firefox/60.0'}
 
 
-def download(pool_sema: threading.Semaphore, img_sema: threading.Semaphore, url: str, output_dir: str, limit: int):
+def download_single_image(pool_sema: threading.Semaphore, img_sema: threading.Semaphore, url: str, output_dir: str, limit: int):
     global in_progress
 
     if url in tried_urls:
@@ -102,7 +103,7 @@ def fetch_images_from_keyword(pool_sema: threading.Semaphore, img_sema: threadin
             for index, link in enumerate(links):
                 if limit is not None and len(tried_urls) >= limit:
                     return
-                t = threading.Thread(target=download, args=(pool_sema, img_sema, link, output_dir, limit))
+                t = threading.Thread(target=download_single_image, args=(pool_sema, img_sema, link, output_dir, limit))
                 t.start()
                 current += 1
             last = links[-1]
@@ -123,14 +124,48 @@ def backup_history(*args):
         exit(0)
 
 
+def main(filters, limit, search_string, search_file, threads=10 ):
+    global tried_urls, image_md5s, adlt
+    output_dir_origin = output_dir
+    signal.signal(signal.SIGINT, backup_history)
+    try:
+        download_history = open(os.path.join(output_dir, 'download_history.pickle'), 'rb')
+        tried_urls = pickle.load(download_history)
+        image_md5s = pickle.load(download_history)
+        download_history.close()
+    except (OSError, IOError):
+        tried_urls = []
+    assert ADULT_FILTER_ON, "adult filter must be turned on"
+    if ADULT_FILTER_ON:
+        adlt = ''
+
+    pool_sema = threading.BoundedSemaphore(threads)
+    img_sema = threading.Semaphore()
+    if search_string:
+        fetch_images_from_keyword(pool_sema, img_sema, search_string, output_dir, filters, limit)
+    elif search_file:
+        try:
+            inputFile = open(search_file)
+        except (OSError, IOError):
+            print("FAIL: Couldn't open file {}".format(search_file))
+            exit(1)
+        else:
+            for keyword in inputFile.readlines():
+                output_sub_dir = os.path.join(output_dir_origin, keyword.strip().replace(' ', '_'))
+                if not os.path.exists(output_sub_dir):
+                    os.makedirs(output_sub_dir)
+                fetch_images_from_keyword(pool_sema, keyword, output_sub_dir, filters, limit)
+                backup_history()
+                time.sleep(10)
+            inputFile.close()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Bing image bulk downloader')
     parser.add_argument('-s', '--search-string', help='Keyword to search', required=False)
     parser.add_argument('-f', '--search-file', help='Path to a file containing search strings line by line',
                         required=False)
     parser.add_argument('-o', '--output', help='Output directory', required=False)
-    parser.add_argument('--adult-filter-on', help='Enable adult filter', action='store_true', required=False)
-    parser.add_argument('--adult-filter-off', help='Disable adult filter', action='store_true', required=False)
     parser.add_argument('--filters',
                         help='Any query based filters you want to append when searching for images, e.g. +filterui:license-L1',
                         required=False)
@@ -144,38 +179,5 @@ if __name__ == "__main__":
         output_dir = args.output
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
-    output_dir_origin = output_dir
-    signal.signal(signal.SIGINT, backup_history)
-    try:
-        download_history = open(os.path.join(output_dir, 'download_history.pickle'), 'rb')
-        tried_urls = pickle.load(download_history)
-        image_md5s = pickle.load(download_history)
-        download_history.close()
-    except (OSError, IOError):
-        tried_urls = []
-    if adult_filter:
-        adlt = ''
-    else:
-        adlt = 'off'
-    if args.adult_filter_off:
-        adlt = 'off'
-    elif args.adult_filter_on:
-        adlt = ''
-    pool_sema = threading.BoundedSemaphore(args.threads)
-    img_sema = threading.Semaphore()
-    if args.search_string:
-        fetch_images_from_keyword(pool_sema, img_sema, args.search_string, output_dir, args.filters, args.limit)
-    elif args.search_file:
-        try:
-            inputFile = open(args.search_file)
-        except (OSError, IOError):
-            print("FAIL: Couldn't open file {}".format(args.search_file))
-            exit(1)
-        for keyword in inputFile.readlines():
-            output_sub_dir = os.path.join(output_dir_origin, keyword.strip().replace(' ', '_'))
-            if not os.path.exists(output_sub_dir):
-                os.makedirs(output_sub_dir)
-            fetch_images_from_keyword(pool_sema, keyword, output_sub_dir, args.filters, args.limit)
-            backup_history()
-            time.sleep(10)
-        inputFile.close()
+
+    main(args.filters, args.limit, args.search_string, args.search_file, args.threads)
