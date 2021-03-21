@@ -13,6 +13,10 @@ import time
 import urllib.parse
 import urllib.request
 
+from logging_setup import logger
+
+from ImageLabelingPackage.ExifImageAgeLabeler import ExifImageAgeLabeler
+
 # config
 output_dir = './bing'  # default output dir
 ADULT_FILTER_ON = True  # Do not disable adult filter by default
@@ -25,7 +29,8 @@ adlt = ""
 urlopenheader = {'User-Agent': 'Mozilla/5.0 (X11; Fedora; Linux x86_64; rv:60.0) Gecko/20100101 Firefox/60.0'}
 
 
-def download_single_image(pool_sema: threading.Semaphore, img_sema: threading.Semaphore, url: str, output_dir: str, limit: int):
+def download_label_single_image(pool_sema: threading.Semaphore, img_sema: threading.Semaphore, url: str,
+                                output_dir: str, limit: int, ageLabeler, dateOfBirth_str):
     global in_progress
 
     if url in tried_urls:
@@ -72,8 +77,17 @@ def download_single_image(pool_sema: threading.Semaphore, img_sema: threading.Se
         imagefile.close()
         print(" OK : " + filename)
         tried_urls.append(url)
+
+        age, age_labeler = ageLabeler.label_age(filename, dateOfBirth_str, image_dir=output_dir)
+        src = os.path.join(output_dir, filename)
+        imagename_with_age = os.path.splitext(filename)[0] + "|{}".format(age) + os.path.splitext(filename)[1]
+        dst = os.path.join(output_dir, imagename_with_age)
+        os.rename(src, dst)
+
+
     except Exception as e:
         print("FAIL: " + filename)
+        print(e)
     finally:
         pool_sema.release()
         if acquired_img_sema:
@@ -81,8 +95,8 @@ def download_single_image(pool_sema: threading.Semaphore, img_sema: threading.Se
         in_progress -= 1
 
 
-def fetch_images_from_keyword(pool_sema: threading.Semaphore, img_sema: threading.Semaphore, keyword: str,
-                              output_dir: str, filters: str, limit: int):
+def fetch_images_for_person(pool_sema: threading.Semaphore, img_sema: threading.Semaphore, keyword: str,
+                            output_dir: str, filters: str, limit: int, ageLabeler, dateOfBirth_str):
     current = 0
     last = ''
     while True:
@@ -103,7 +117,7 @@ def fetch_images_from_keyword(pool_sema: threading.Semaphore, img_sema: threadin
             for index, link in enumerate(links):
                 if limit is not None and len(tried_urls) >= limit:
                     return
-                t = threading.Thread(target=download_single_image, args=(pool_sema, img_sema, link, output_dir, limit))
+                t = threading.Thread(target=download_label_single_image, args=(pool_sema, img_sema, link, output_dir, limit, ageLabeler, dateOfBirth_str))
                 t.start()
                 current += 1
             last = links[-1]
@@ -124,8 +138,10 @@ def backup_history(*args):
         exit(0)
 
 
-def main(filters, limit, search_string, search_file, threads=10 ):
+def main(person_keyword, dateOfBirth_str, search_file, limit, threads=10, filters=None, output_dir="./bing"):
     global tried_urls, image_md5s, adlt
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
     output_dir_origin = output_dir
     signal.signal(signal.SIGINT, backup_history)
     try:
@@ -141,8 +157,10 @@ def main(filters, limit, search_string, search_file, threads=10 ):
 
     pool_sema = threading.BoundedSemaphore(threads)
     img_sema = threading.Semaphore()
-    if search_string:
-        fetch_images_from_keyword(pool_sema, img_sema, search_string, output_dir, filters, limit)
+    ageLabeler = ExifImageAgeLabeler()
+    if person_keyword:
+        fetch_images_for_person(pool_sema, img_sema, person_keyword, output_dir, filters, limit, ageLabeler,
+                                dateOfBirth_str)
     elif search_file:
         try:
             inputFile = open(search_file)
@@ -150,34 +168,22 @@ def main(filters, limit, search_string, search_file, threads=10 ):
             print("FAIL: Couldn't open file {}".format(search_file))
             exit(1)
         else:
-            for keyword in inputFile.readlines():
+            for keyword, dateOfBirth_str in inputFile.readlines():
                 output_sub_dir = os.path.join(output_dir_origin, keyword.strip().replace(' ', '_'))
                 if not os.path.exists(output_sub_dir):
                     os.makedirs(output_sub_dir)
-                fetch_images_from_keyword(pool_sema, keyword, output_sub_dir, filters, limit)
+                fetch_images_for_person(pool_sema, img_sema, person_keyword, output_dir, filters, limit,
+                                        ageLabeler,
+                                        dateOfBirth_str)
                 backup_history()
                 time.sleep(10)
             inputFile.close()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Bing image bulk downloader')
-    parser.add_argument('-s', '--search-string', help='Keyword to search', required=False)
-    parser.add_argument('-f', '--search-file', help='Path to a file containing search strings line by line',
-                        required=False)
-    parser.add_argument('-o', '--output', help='Output directory', required=False)
-    parser.add_argument('--filters',
-                        help='Any query based filters you want to append when searching for images, e.g. +filterui:license-L1',
-                        required=False)
-    parser.add_argument('--limit', help='Make sure not to search for more than specified amount of images.',
-                        required=False, type=int)
-    parser.add_argument('--threads', help='Number of threads', type=int, default=20)
-    args = parser.parse_args()
-    if (not args.search_string) and (not args.search_file):
-        parser.error('Provide Either search string or path to file containing search strings')
-    if args.output:
-        output_dir = args.output
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    main(args.filters, args.limit, args.search_string, args.search_file, args.threads)
+    # keyword = "Kyle Harrison Breitkopf actor"
+    # dateOfBirth = "2005-07-13T00:00:00Z"
+    keyword = "Hannah Schiller actor"
+    dateOfBirth = "2006-02-17T00:00:00Z"
+    main(person_keyword=keyword, dateOfBirth_str=dateOfBirth, search_file=None, limit=50,
+         threads=10, output_dir="../images/"+keyword.replace(" ", "_"))
